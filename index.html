@@ -39,8 +39,8 @@
 <main>
   <div id="sign"><canvas id="cv" title="Tap for the next plane"></canvas></div>
   <form id="where" class="row">
-    <input id="at" placeholder="Latitude, longitude, e.g. 40.758, -73.986" autocomplete="off" aria-label="Location" required
-           pattern="\s*-?\d+(\.\d+)?\s*[,\s]\s*-?\d+(\.\d+)?\s*" title="Latitude, longitude">
+    <input id="at" placeholder="Location (40.758, -73.986) or flight (UA79)" autocomplete="off" aria-label="Location or flight number" required
+           pattern="\s*-?\d+(\.\d+)?\s*[,\s]\s*-?\d+(\.\d+)?\s*|\s*[A-Za-z0-9]{2}[A-Za-z]?\s*\d{1,4}[A-Za-z]?\s*" title="Latitude, longitude, or a flight number like UA79">
     <button>Set</button>
     <button id="geo" type="button">Use my location</button>
   </form>
@@ -48,7 +48,7 @@
     <div id="radius" role="radiogroup" aria-label="Radius"></div>
     <button id="fs" type="button">Fullscreen</button>
   </div>
-  <p class="note">Shows the five nearest planes in the air. Tap the sign for the next one. Keys: N next, F fullscreen. Your setup is saved in the URL, so bookmark it.</p>
+  <p class="note">Type a flight number like UA79 to follow it, or tap Use my location to see the planes overhead. Tap the sign for the next plane.</p>
   <p class="note">Positions from <a href="https://adsb.lol">adsb.lol</a> (ODbL), routes from <a href="https://www.adsbdb.com">adsbdb</a>. Route data comes from callsign databases and can be wrong. Not affiliated with TheFlightWall.</p>
 </main>
 
@@ -97,21 +97,27 @@ const fit = (s, n) => { if (s.length <= n) return s; const i = s.lastIndexOf(' '
 const cut = (a, b, n) => a.slice(0, Math.max(n - b.length, n >> 1)).trim();   // a's share of n chars when printed next to b
 const ascii = s => s.normalize('NFKD').replace(/[^ -~]/g, '');   // Montréal -> Montreal
 const parseAt = s => { const [la, lo] = (s ?? '').split(/[\s,]+/).filter(Boolean).map(Number); return Math.abs(la) <= 90 && Math.abs(lo) <= 180 ? [la, lo] : null; };
+const parseFlight = s => { s = (s ?? '').replace(/\s/g, '').toUpperCase(); return /^[A-Z0-9]{2}[A-Z]?\d{1,4}[A-Z]?$/.test(s) ? s : null; };   // ' ua 79' -> 'UA79'
 
-// ---- state: setup lives in the URL (?at=40.758,-73.986&r=10), mirrored to localStorage for bare visits ----
+// ---- state: setup lives in the URL (?at=40.758,-73.986&r=10, plus &flight=UA79 when following one), mirrored to localStorage for bare visits ----
 let saved = null; try { saved = localStorage.getItem('flights'); } catch {}
 // A home-screen app relaunches the URL it was added with, so there the last saved setup wins.
 const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
 const init = new URLSearchParams(saved && (standalone || location.search.length < 2) ? saved : location.search || '?at=40.758,-73.986&r=10');
-let at = parseAt(init.get('at')) ?? [40.758, -73.986], radius = RADII.includes(+init.get('r')) ? +init.get('r') : 10;
-let flights = [], lastOk = 0, showHex, shownAt = 0, dirty = true;
-const started = Date.now(), routes = new Map();   // callsign -> adsbdb flightroute; null while loading or when unknown
+let at = parseAt(init.get('at')) ?? [40.758, -73.986], radius = RADII.includes(+init.get('r')) ? +init.get('r') : 10, flight = parseFlight(init.get('flight'));
+let flights = [], lastOk = 0, started = Date.now(), showHex, shownAt = 0, dirty = true;
+const routes = new Map();   // callsign -> adsbdb flightroute; null while loading or when unknown
 
 // ---- data ----
 async function poll() {
-  const res = await fetch(`/api/point?lat=${at[0]}&lon=${at[1]}&r=${(radius / MI).toFixed(1)}`);
+  const f = flight;
+  let q = `lat=${at[0]}&lon=${at[1]}&r=${(radius / MI).toFixed(1)}`;
+  if (f) { await lookup(f); q = 'cs=' + (routes.get(f)?.callsign_icao ?? f); }   // UA79 -> UAL79, the callsign the plane broadcasts
+  const res = await fetch('/api/adsb?' + q);
   if (!res.ok) throw Error(res.status);
-  flights = nearby(await res.json()); lastOk = Date.now();
+  const j = await res.json();
+  if (f !== flight) return;   // the setup changed while this was out
+  flights = f ? (j.ac ?? []).slice(0, 1) : nearby(j); lastOk = Date.now();
   flights.forEach(a => lookup(a.flight?.trim()));   // prefetch, so a plane's route is usually in before its turn
 }
 const tick = () => poll().catch(() => {});   // a failed poll keeps the last list until it goes stale
@@ -119,7 +125,7 @@ function lookup(cs) {
   if (!cs || routes.has(cs)) return;
   if (routes.size > 2000) routes.clear();   // a wall sign runs for weeks, and schedules change anyway
   routes.set(cs, null);
-  fetch('https://api.adsbdb.com/v0/callsign/' + encodeURIComponent(cs))
+  return fetch('https://api.adsbdb.com/v0/callsign/' + encodeURIComponent(cs))
     .then(r => r.status === 404 ? null : r.ok ? r.json().then(j => j.response.flightroute) : Promise.reject())
     .then(fr => routes.set(cs, fr), () => routes.delete(cs));   // network trouble: ask again next poll
 }
@@ -130,16 +136,17 @@ function next() {   // when the current plane has flown off, start over at the n
   const i = flights.findIndex(a => a.hex === showHex);
   showHex = flights[(i + 1) % flights.length]?.hex; shownAt = Date.now();
 }
-function save() {
-  const q = `?at=${at.join(',')}&r=${radius}`;
+function apply() {   // a new setup: save it, drop the old planes and poll right away
+  const q = `?at=${at.join(',')}&r=${radius}` + (flight ? '&flight=' + flight : '');
   try { history.replaceState(null, '', q); localStorage.setItem('flights', q); } catch {}
-  $('#at').value = at.join(', ');
-  for (const b of document.getElementsByName('r')) b.checked = +b.value === radius;
+  $('#at').value = flight ?? at.join(', ');
+  for (const b of document.getElementsByName('r')) b.checked = !flight && +b.value === radius;   // no radius while following a flight
+  flights = []; lastOk = 0; started = Date.now(); tick();
 }
 $('#radius').innerHTML = RADII.map(m => `<label><input type="radio" name="r" value="${m}">${m} mi</label>`).join('');
-$('#radius').onchange = e => { radius = +e.target.value; save(); tick(); };
-$('#where').onsubmit = e => { e.preventDefault(); const p = parseAt($('#at').value); if (p) { at = p; save(); tick(); } };
-$('#geo').onclick = () => navigator.geolocation.getCurrentPosition(p => { at = [p.coords.latitude, p.coords.longitude].map(v => +v.toFixed(3)); save(); tick(); }, e => alert(e.message));
+$('#radius').onchange = e => { radius = +e.target.value; flight = null; apply(); };
+$('#where').onsubmit = e => { e.preventDefault(); const v = $('#at').value, p = parseAt(v); if (p) at = p; flight = p ? null : parseFlight(v); apply(); };
+$('#geo').onclick = () => navigator.geolocation.getCurrentPosition(p => { at = [p.coords.latitude, p.coords.longitude].map(v => +v.toFixed(3)); flight = null; apply(); }, e => alert(e.message));
 $('#cv').onclick = next;
 $('#fs').onclick = fullscreen;
 $('#fs').hidden = !(document.fullscreenEnabled || document.webkitFullscreenEnabled);   // iPhone: use Add to Home Screen instead
@@ -167,16 +174,23 @@ function text(s, x, y, f, color, z = 1) {   // bitmap text at scale z; returns t
   return x;
 }
 const right = (s, y, f, color) => text(s, W - s.length * f.w, y, f, color);
+// Following a flight: straight-line distance to the destination at the current ground speed, e.g. '1h05m left'.
+// ponytail: rough while climbing or on approach; a real ETA needs a paid flight-data API.
+function timeLeft(a, route) {
+  if (!route || !(a.gs > 50)) return '';   // no route, or still on the ground
+  const m = Math.round(nm(a.lat, a.lon, route.destination.latitude, route.destination.longitude) / a.gs * 60);
+  return (m < 60 ? m : `${m / 60 | 0}h${String(m % 60).padStart(2, '0')}`) + 'm left';
+}
 function compose(now) {
   buf.fill(0);
   if (now - shownAt > DWELL || !flights.some(a => a.hex === showHex)) next();
   const stale = now - lastOk > 60000, a = !stale && flights.find(f => f.hex === showHex);
   if (!a) {
-    text(!lastOk && now - started < 20000 ? 'Loading...' : stale ? 'No data' : 'Clear skies', 0, 16, FONT6, AMBER);
-    if (!stale) text(`No planes within ${radius} mi`, 0, 34, FONT5, RED);
+    text(!lastOk && now - started < 20000 ? 'Loading...' : stale ? 'No data' : flight ?? 'Clear skies', 0, 16, FONT6, AMBER);
+    if (!stale) text(flight ? 'Not on radar right now' : `No planes within ${radius} mi`, 0, 34, FONT5, RED);
     return;
   }
-  const cs = a.flight?.trim(), fr = cs && routes.get(cs), route = fr && plausible(fr, a.lat, a.lon) ? fr : null;
+  const cs = a.flight?.trim(), fr = routes.get(flight ?? cs), route = fr && plausible(fr, a.lat, a.lon) ? fr : null;
   const id = fr?.callsign_iata ?? cs ?? a.r ?? a.hex.toUpperCase(), top = route ? id : a.r && a.r !== id ? a.r : '';
   text(top, 0, 0, FONT5, WHITE);
   if (fr?.airline) right(fit(fr.airline.name, 24 - top.length), 0, FONT5, SKY);
@@ -187,8 +201,8 @@ function compose(now) {
     x = text(cut(on, dn, 22), 0, 31, FONT5, AMBER); x = text(' > ', x, 31, FONT5, RED); text(cut(dn, on, 22), x, 31, FONT5, AMBER);
   } else text(id, (W - id.length * 12) >> 1, 6, FONT6, AMBER, 2);
   text(TYPES[a.t] ?? a.t ?? '', 0, 42, FONT5, WHITE);
-  text([typeof a.alt_baro === 'number' && a.alt_baro + 'ft', a.gs != null && Math.round(a.gs * MI) + 'mph'].filter(Boolean).join(' '), 0, 53, FONT5, GREEN);
-  right(`${(a.dst * MI).toFixed(1)}mi ${COMPASS[Math.round(a.dir / 45) % 8] ?? ''}`.trim(), 53, FONT5, WHITE);   // where to look
+  text([a.alt_baro === 'ground' ? 'On ground' : typeof a.alt_baro === 'number' && a.alt_baro + 'ft', a.gs != null && Math.round(a.gs * MI) + 'mph'].filter(Boolean).join(' '), 0, 53, FONT5, GREEN);
+  right(flight ? timeLeft(a, route) : `${(a.dst * MI).toFixed(1)}mi ${COMPASS[Math.round(a.dir / 45) % 8] ?? ''}`.trim(), 53, FONT5, WHITE);   // following: time to go; nearby: where to look
   const n = flights.length, cur = flights.indexOf(a);
   if (n > 1) for (let k = 0; k < n; k++) buf.fill(k === cur ? WHITE : DIM, 63 * W + 65 - n * 3 + k * 6, 63 * W + 69 - n * 3 + k * 6);   // pager
 }
@@ -221,8 +235,8 @@ new ResizeObserver(() => {
   ctx.imageSmoothingEnabled = true; ctx.drawImage(fb, 0, 0, w, h);              // soft bloom
 })();
 
-save();   // normalizes the URL and fills in the controls
-tick(); setInterval(tick, 10000);
+apply();   // normalizes the URL, fills in the controls and polls
+setInterval(tick, 10000);
 const wake = () => navigator.wakeLock?.request('screen').catch(() => {});   // keep a wall tablet's screen on
 wake();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
