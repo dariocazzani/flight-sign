@@ -33,6 +33,11 @@
   #radius label:has(:focus-visible) { outline: 2px solid var(--fg); outline-offset: -4px; }
   .note { margin: 0; color: var(--dim); font-size: 13px; }
   .note a { color: inherit; }
+  .tip { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding-top: 18px; border-top: 1px solid var(--edge); }
+  .tip img { display: block; border-radius: 6px; }
+  .tip div { flex: 1 1 260px; display: grid; gap: 8px; }
+  .tip h2 { margin: 0; font-size: 17px; }
+  .tip code { margin-right: 12px; color: var(--fg); font: inherit; font-weight: 600; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -50,6 +55,14 @@
   </div>
   <p class="note">Type a flight number like UA79 to follow it, or tap Use my location to see the planes overhead. Tap the sign for the next plane.</p>
   <p class="note">Positions from <a href="https://adsb.lol">adsb.lol</a> (ODbL), routes from <a href="https://www.adsbdb.com">adsbdb</a>. Route data comes from callsign databases and can be wrong. Not affiliated with TheFlightWall.</p>
+  <section class="tip" aria-labelledby="tip-title">
+    <a href="lightning:LNURL1DP68GURN8GHJ7AMPD3KX2AR0VEEKZAR0WD5XJTNRDAKJ7TNHV4KXCTTTDEHHWM30D3H82UNVWQHKGMMVD35HX6RKD9HKCET5XVENG57DXPF" aria-label="Open a Lightning wallet to send a tip"><img src="tip-qr.svg" alt="Lightning tip QR code" width="112" height="112" loading="lazy"></a>
+    <div>
+      <h2 id="tip-title">Tip a few sats</h2>
+      <p class="note">One person built this for fun. No ads, no tracking, no newsletter. If it was useful, a tip keeps it running.<span id="tip-usd"></span></p>
+      <p class="note"><code>dollishviolet334@walletofsatoshi.com</code><button type="button" id="tip-copy">Copy address</button></p>
+    </div>
+  </section>
 </main>
 
 <script id="core">
@@ -240,6 +253,17 @@ setInterval(tick, 10000);
 const wake = () => navigator.wakeLock?.request('screen').catch(() => {});   // keep a wall tablet's screen on
 wake();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
+
+// Tip jar: the same Lightning address and QR as btc-purchasing-power.
+// ponytail: copied into each sign; an embeddable tip page on btc-purchasing-power would make it one copy.
+$('#tip-copy').onclick = async e => {
+  try { await navigator.clipboard.writeText($('.tip code').textContent); e.target.textContent = 'Copied'; } catch { e.target.textContent = 'Copy failed'; }
+  setTimeout(() => { e.target.textContent = 'Copy address'; }, 2000);
+};
+fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot').then(r => r.json()).then(j => {
+  const usd = j.data.amount / 1e5;   // 1,000 sats = 0.00001 BTC
+  if (usd > 0) $('#tip-usd').textContent = ` 1,000 sats is about $${usd.toFixed(2)} right now.`;
+}).catch(() => {});   // no price, no price line
 </script>
 </body>
 </html>
